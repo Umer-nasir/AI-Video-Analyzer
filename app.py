@@ -16,7 +16,14 @@ except ImportError:
 
 
 APP_TITLE = "Video Analysis using AI"
-DEFAULT_MODEL = "gpt-4.1-mini"
+DEFAULT_MODEL = "Will Be Updated Soon"
+
+PROVIDER_MODELS = {
+    "OpenAI": "gpt-4o",
+    "Groq": "llama-3.3-70b-versatile",
+    "Gemini": "gemini-1.5-flash",
+    "Anthropic": "claude-3-5-sonnet-latest",
+}
 
 
 @dataclass
@@ -56,6 +63,18 @@ USE_CASE_PROMPTS = {
     },
 }
 
+
+
+def detect_provider(api_key: str) -> str:
+    if api_key.startswith("sk-proj-"):
+        return "OpenAI"
+    elif api_key.startswith("gsk_"):
+        return "Groq"
+    elif api_key.startswith("AIza"):
+        return "Gemini"
+    elif api_key.startswith("sk-ant-api03-"):
+        return "Anthropic"
+    return "Unknown"
 
 def save_upload_to_temp(uploaded_file) -> str:
     suffix = Path(uploaded_file.name).suffix or ".mp4"
@@ -124,33 +143,34 @@ def image_data_url(image_bytes: bytes) -> str:
     return f"data:image/jpeg;base64,{encoded}"
 
 
-def call_openai_chat(model: str, messages: list[dict], max_tokens: int) -> str:
-    if not os.getenv("OPENAI_API_KEY"):
-        raise RuntimeError("Set the `OPENAI_API_KEY` environment variable before running analysis.")
 
-    response = requests.post(
-        "https://api.openai.com/v1/chat/completions",
-        headers={
-            "Authorization": f"Bearer {os.environ['OPENAI_API_KEY']}",
-            "Content-Type": "application/json",
-        },
-        json={
-            "model": model,
-            "messages": messages,
-            "max_tokens": max_tokens,
-        },
-        timeout=90,
-    )
+def call_llm(provider: str, model: str, messages: list[dict], max_tokens: int) -> str:
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        raise RuntimeError(f"Set the `{provider}_API_KEY` or `OPENAI_API_KEY` environment variable.")
+
+    if provider == "OpenAI":
+        url = "https://api.openai.com/v1/chat/completions"
+        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+        json_data = {"model": model, "messages": messages, "max_tokens": max_tokens}
+    elif provider == "Groq":
+        url = "https://api.groq.com/openai/v1/chat/completions"
+        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+        json_data = {"model": model, "messages": messages, "max_tokens": max_tokens}
+    else:
+        raise RuntimeError(f"Provider {provider} not fully supported yet.")
+
+    response = requests.post(url, headers=headers, json=json_data, timeout=90)
     if not response.ok:
         detail = response.text[:500]
-        raise RuntimeError(f"OpenAI request failed with HTTP {response.status_code}: {detail}")
+        raise RuntimeError(f"{provider} request failed with HTTP {response.status_code}: {detail}")
 
-    payload = response.json()
-    return payload["choices"][0]["message"]["content"].strip()
+    return response.json()["choices"][0]["message"]["content"].strip()
 
 
-def analyze_frame(model: str, sample: FrameSample, prompt: str) -> str:
-    return call_openai_chat(
+def analyze_frame(provider: str, model: str, sample: FrameSample, prompt: str) -> str:
+    return call_llm(
+        provider,
         model,
         [
             {
@@ -165,9 +185,10 @@ def analyze_frame(model: str, sample: FrameSample, prompt: str) -> str:
     )
 
 
-def summarize_video(model: str, descriptions: Iterable[str], prompt: str) -> str:
+def summarize_video(provider: str, model: str, descriptions: Iterable[str], prompt: str) -> str:
     observation_block = "\n".join(descriptions)
-    return call_openai_chat(
+    return call_llm(
+        provider,
         model,
         [
             {
@@ -201,7 +222,32 @@ def main() -> None:
         use_case = st.selectbox("Use case", list(USE_CASE_PROMPTS.keys()))
         interval_seconds = st.slider("Frame interval", 1, 10, 3, help="Extract one frame every N seconds.")
         max_frames = st.slider("Maximum frames", 1, 20, 8, help="Lower values are faster and cheaper.")
-        model = st.text_input("Model", value=os.getenv("OPENAI_MODEL", DEFAULT_MODEL))
+        
+        api_key = st.text_input("API Key", type="password", help="Enter your API key.")
+        
+        provider_options = ["Auto-detect", "OpenAI", "Groq", "Gemini", "Anthropic"]
+        selected_provider_ui = st.selectbox("Provider", provider_options, index=0)
+        
+        if "model_val" not in st.session_state:
+            st.session_state.model_val = os.getenv("OPENAI_MODEL", DEFAULT_MODEL)
+
+        if api_key:
+            os.environ["OPENAI_API_KEY"] = api_key
+            detected_provider = detect_provider(api_key)
+            provider = detected_provider if selected_provider_ui == "Auto-detect" else selected_provider_ui
+            st.info(f"Using provider: {provider}")
+
+            if "last_provider" not in st.session_state:
+                st.session_state.last_provider = provider
+                st.session_state.model_val = PROVIDER_MODELS.get(provider, "")
+            
+            if provider != st.session_state.last_provider:
+                st.session_state.model_val = PROVIDER_MODELS.get(provider, "")
+                st.session_state.last_provider = provider
+        else:
+            provider = "Unknown"
+
+        model = st.text_input("Model", key="model_val")
 
     uploaded_file = st.file_uploader("Upload an MP4 video", type=["mp4"])
     if uploaded_file is None:
@@ -231,12 +277,12 @@ def main() -> None:
         observations: list[str] = []
         progress = st.progress(0, text="Analyzing frames...")
         for idx, sample in enumerate(frames, start=1):
-            description = analyze_frame(model, sample, prompts["frame"])
+            description = analyze_frame(provider, model, sample, prompts["frame"])
             observations.append(f"{sample.timestamp:.1f}s: {description}")
             progress.progress(idx / len(frames), text=f"Analyzed {idx} of {len(frames)} frames")
 
         with st.spinner("Writing summary..."):
-            summary = summarize_video(model, observations, prompts["summary"])
+            summary = summarize_video(provider, model, observations, prompts["summary"])
 
         st.subheader("Video Summary")
         st.write(summary)

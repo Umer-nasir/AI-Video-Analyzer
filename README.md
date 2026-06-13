@@ -16,11 +16,10 @@ A simple Streamlit app that accepts an `.mp4` video, extracts one frame every fe
 
 ```powershell
 python -m pip install -r requirements.txt
-$env:OPENAI_API_KEY="your-api-key"
 streamlit run app.py
 ```
 
-The default model is `gpt-4.1-mini`. You can override it in the sidebar or set:
+You can enter your API key directly in the app's sidebar. The app will attempt to **automatically detect** the LLM provider (OpenAI or Groq) based on your API key format, or you can manually override the provider in the sidebar. The default model is `gpt-4.1-mini`. You can override it in the sidebar or set:
 
 ```powershell
 $env:OPENAI_MODEL="your-model-name"
